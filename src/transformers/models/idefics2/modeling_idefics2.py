@@ -40,6 +40,10 @@ from ...utils import (
 )
 from ..auto import AutoModel
 from .configuration_idefics2 import Idefics2Config, Idefics2VisionConfig
+import contextlib
+
+use_flash_attn = False
+use_flash_attn_vision_transformer = True
 
 
 if is_flash_attn_2_available():
@@ -268,10 +272,9 @@ class Idefics2VisionAttention(nn.Module):
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
-
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, attn_weights
+        return attn_output, None
 
 
 class Idefics2VisionFlashAttention2(Idefics2VisionAttention):
@@ -465,12 +468,6 @@ class Idefics2VisionFlashAttention2(Idefics2VisionAttention):
         )
 
 
-IDEFICS_VISION_ATTENTION_CLASSES = {
-    "eager": Idefics2VisionAttention,
-    "flash_attention_2": Idefics2VisionFlashAttention2,
-}
-
-
 # Copied from transformers.models.siglip.modeling_siglip.SiglipMLP with Siglip->Idefics2Vision
 class Idefics2VisionMLP(nn.Module):
     def __init__(self, config):
@@ -540,7 +537,10 @@ class Idefics2EncoderLayer(nn.Module):
     def __init__(self, config: Idefics2Config):
         super().__init__()
         self.embed_dim = config.hidden_size
-        self.self_attn = IDEFICS_VISION_ATTENTION_CLASSES[config._attn_implementation](config)
+        if use_flash_attn_vision_transformer:
+            self.self_attn = Idefics2VisionFlashAttention2(config)
+        else:
+            self.self_attn = Idefics2VisionAttention(config)
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Idefics2VisionMLP(config)
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
@@ -683,7 +683,7 @@ class Idefics2VisionTransformer(nn.Module):
         self.embeddings = Idefics2VisionEmbeddings(config)
         self.encoder = Idefics2Encoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        self._use_flash_attention_2 = use_flash_attn_vision_transformer
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -1162,12 +1162,6 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
         )
 
 
-IDEFICS2_PERCEIVER_ATTENTION_CLASSES = {
-    "eager": Idefics2PerceiverAttention,
-    "flash_attention_2": Idefics2PerceiverFlashAttention2,
-}
-
-
 class Idefics2PerceiverLayer(nn.Module):
     def __init__(self, config, layer_idx: int):
         super().__init__()
@@ -1178,7 +1172,10 @@ class Idefics2PerceiverLayer(nn.Module):
 
         self.input_latents_norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.input_context_norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
-        self.self_attn = IDEFICS2_PERCEIVER_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx=layer_idx)
+        if use_flash_attn:
+            self.self_attn = Idefics2PerceiverFlashAttention2(config, layer_idx=layer_idx)
+        else:
+            self.self_attn = Idefics2PerceiverAttention(config, layer_idx=layer_idx)
         self.post_attention_layernorm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.mlp = Idefics2MLP(
             hidden_size=config.text_config.hidden_size,
@@ -1262,7 +1259,7 @@ class Idefics2PerceiverResampler(nn.Module):
         self.layers = nn.ModuleList([Idefics2PerceiverLayer(config, idx) for idx in range(self.depth)])
         self.norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
 
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        self._use_flash_attention_2 = use_flash_attn
 
     def forward(
         self,
@@ -1476,12 +1473,12 @@ class Idefics2Model(Idefics2PreTrainedModel):
 
         self.vision_model = Idefics2VisionTransformer(config.vision_config)
         self.connector = Idefics2Connector(config)
-        self.text_model = AutoModel.from_config(config.text_config, attn_implementation=config._attn_implementation)
+        self.text_model = AutoModel.from_config(config.text_config, attn_implementation="sdpa")
 
         self.image_seq_len = config.perceiver_config.resampler_n_latents
         self.image_token_id = self.config.image_token_id
 
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        self._use_flash_attention_2 = use_flash_attn
 
         self.post_init()
 
@@ -1612,13 +1609,14 @@ class Idefics2Model(Idefics2PreTrainedModel):
             raise ValueError("You cannot specify both pixel_values and image_hidden_states at the same time")
         elif pixel_values is not None:
             batch_size, num_images, num_channels, height, width = pixel_values.shape
-            pixel_values = pixel_values.to(dtype=self.dtype)  # fp16 compatibility
+            if pixel_values.dtype == torch.float32 and self.dtype != torch.float32:
+                pixel_values = pixel_values.to(dtype=self.dtype)  # fp16 compatibility
             pixel_values = pixel_values.view(batch_size * num_images, *pixel_values.shape[2:])
 
             # Remove padding images - padding images are full 0.
             nb_values_per_image = pixel_values.shape[1:].numel()
             real_images_inds = (pixel_values == 0.0).sum(dim=(-1, -2, -3)) != nb_values_per_image
-            pixel_values = pixel_values[real_images_inds].contiguous()
+            # pixel_values = pixel_values[real_images_inds].contiguous()
 
             # Handle the vision attention mask
             if pixel_attention_mask is None:
@@ -1628,22 +1626,23 @@ class Idefics2Model(Idefics2PreTrainedModel):
                     device=pixel_values.device,
                 )
             else:
-                # Remove padding images from the mask/pP p
                 pixel_attention_mask = pixel_attention_mask.view(
                     batch_size * num_images, *pixel_attention_mask.shape[2:]
                 )
-                pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
+                # Remove padding images from the mask/pP p
+                # pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
 
             patch_size = self.config.vision_config.patch_size
             patches_subgrid = pixel_attention_mask.unfold(dimension=1, size=patch_size, step=patch_size)
             patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
             patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
-            # Get sequence from the vision encoder
-            image_hidden_states = self.vision_model(
-                pixel_values=pixel_values,
-                patch_attention_mask=patch_attention_mask,
-            ).last_hidden_state
+            with contextlib.nullcontext() if self.vision_model.training else torch.no_grad():
+                # Get sequence from the vision encoder
+                image_hidden_states = self.vision_model(
+                    pixel_values=pixel_values,
+                    patch_attention_mask=patch_attention_mask,
+                ).last_hidden_state
 
             # Modality projection & resampling
             image_hidden_states = self.connector(
@@ -1656,6 +1655,8 @@ class Idefics2Model(Idefics2PreTrainedModel):
         if past_seen_tokens == 0 and inputs_embeds is not None and image_hidden_states is not None:
             # When we generate, we don't want to replace the potential image_token_id that we generated by images
             # that simply don't exist
+            image_hidden_states = image_hidden_states[real_images_inds].contiguous()
+
             inputs_embeds = self.inputs_merger(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,

@@ -99,7 +99,7 @@ def make_list_of_images(images: ImageInput) -> List[List[np.ndarray]]:
         isinstance(images, (list, tuple))
         and len(images) > 0
         and isinstance(images[0], (list, tuple))
-        and is_valid_image(images[0][0])
+        and (len(images[0]) == 0 or is_valid_image(images[0][0]))
     ):
         pass
     else:
@@ -124,14 +124,21 @@ def get_max_height_width(
     Get the maximum height and width across all images in a batch.
     """
     if input_data_format is None:
-        input_data_format = infer_channel_dimension_format(images_list[0][0])
+        check_image = [x[0] for x in images_list if len(x) > 0]
+        check_image = None if len(check_image) == 0 else check_image[0]
+        if check_image is not None:
+            input_data_format = infer_channel_dimension_format(check_image)
 
     image_sizes = []
     for images in images_list:
         for image in images:
             image_sizes.append(get_image_size(image, channel_dim=input_data_format))
 
-    max_height, max_width = max_across_indices(image_sizes)
+    max_ = max_across_indices(image_sizes)
+    if len(max_) == 0:
+        max_height, max_width = 256, 256
+    else:
+        max_height, max_width = max_
     return (max_height, max_width)
 
 
@@ -346,10 +353,22 @@ class Idefics2ImageProcessor(BaseImageProcessor):
         pad_size = get_max_height_width(images, input_data_format=input_data_format)
 
         batch_size = len(images)
-        max_num_images = max(len(images_) for images_ in images)
-        input_data_format = (
-            infer_channel_dimension_format(images[0][0]) if input_data_format is None else input_data_format
-        )
+
+        # XXX
+        # max_num_images = max(len(images_) for images_ in images)
+        max_num_images = 5
+        for images_ in images:
+            assert len(images_) <= max_num_images
+
+        check_image = [x[0] for x in images if len(x) > 0]
+        check_image = None if len(check_image) == 0 else check_image[0]
+        if check_image is not None:
+            input_data_format = (
+                infer_channel_dimension_format(check_image) if input_data_format is None else input_data_format
+            )
+        else:
+            input_data_format = ChannelDimension.LAST
+
         data_format = input_data_format if data_format is None else data_format
 
         def empty_image(size, input_data_format):
@@ -528,7 +547,9 @@ class Idefics2ImageProcessor(BaseImageProcessor):
         # All transformations expect numpy arrays.
         images_list = [[to_numpy_array(image) for image in images] for images in images_list]
 
-        if is_scaled_image(images_list[0][0]) and do_rescale:
+        check_image = [x[0] for x in images_list if len(x) > 0]
+        check_image = None if len(check_image) == 0 else check_image[0]
+        if check_image is not None and is_scaled_image(check_image) and do_rescale:
             logger.warning_once(
                 "It looks like you are trying to rescale already rescaled images. If the input"
                 " images have pixel values between 0 and 1, set `do_rescale=False` to avoid rescaling them again."
@@ -536,7 +557,8 @@ class Idefics2ImageProcessor(BaseImageProcessor):
 
         if input_data_format is None:
             # We assume that all images have the same channel dimension format.
-            input_data_format = infer_channel_dimension_format(images_list[0][0])
+            if check_image is not None:
+                input_data_format = infer_channel_dimension_format(check_image)
 
         if do_image_splitting:
             new_images_list = []
