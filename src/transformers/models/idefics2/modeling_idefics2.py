@@ -42,9 +42,6 @@ from ..auto import AutoModel
 from .configuration_idefics2 import Idefics2Config, Idefics2VisionConfig
 import contextlib
 
-use_flash_attn = False
-use_flash_attn_vision_transformer = True
-
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -272,9 +269,10 @@ class Idefics2VisionAttention(nn.Module):
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, q_len, self.embed_dim)
+
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, None
+        return attn_output, attn_weights
 
 
 class Idefics2VisionFlashAttention2(Idefics2VisionAttention):
@@ -468,6 +466,13 @@ class Idefics2VisionFlashAttention2(Idefics2VisionAttention):
         )
 
 
+IDEFICS_VISION_ATTENTION_CLASSES = {
+    "eager": Idefics2VisionAttention,
+    "flash_attention_2": Idefics2VisionFlashAttention2,
+}
+
+
+
 # Copied from transformers.models.siglip.modeling_siglip.SiglipMLP with Siglip->Idefics2Vision
 class Idefics2VisionMLP(nn.Module):
     def __init__(self, config):
@@ -537,10 +542,7 @@ class Idefics2EncoderLayer(nn.Module):
     def __init__(self, config: Idefics2Config):
         super().__init__()
         self.embed_dim = config.hidden_size
-        if use_flash_attn_vision_transformer:
-            self.self_attn = Idefics2VisionFlashAttention2(config)
-        else:
-            self.self_attn = Idefics2VisionAttention(config)
+        self.self_attn = IDEFICS_VISION_ATTENTION_CLASSES[config._attn_implementation](config)
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Idefics2VisionMLP(config)
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
@@ -683,7 +685,7 @@ class Idefics2VisionTransformer(nn.Module):
         self.embeddings = Idefics2VisionEmbeddings(config)
         self.encoder = Idefics2Encoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self._use_flash_attention_2 = use_flash_attn_vision_transformer
+        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -1161,6 +1163,10 @@ class Idefics2PerceiverFlashAttention2(Idefics2PerceiverAttention):
             (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
         )
 
+IDEFICS2_PERCEIVER_ATTENTION_CLASSES = {
+    "eager": Idefics2PerceiverAttention,
+    "flash_attention_2": Idefics2PerceiverFlashAttention2,
+}
 
 class Idefics2PerceiverLayer(nn.Module):
     def __init__(self, config, layer_idx: int):
@@ -1172,10 +1178,7 @@ class Idefics2PerceiverLayer(nn.Module):
 
         self.input_latents_norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.input_context_norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
-        if use_flash_attn:
-            self.self_attn = Idefics2PerceiverFlashAttention2(config, layer_idx=layer_idx)
-        else:
-            self.self_attn = Idefics2PerceiverAttention(config, layer_idx=layer_idx)
+        self.self_attn = IDEFICS2_PERCEIVER_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx=layer_idx)
         self.post_attention_layernorm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.mlp = Idefics2MLP(
             hidden_size=config.text_config.hidden_size,
@@ -1259,7 +1262,7 @@ class Idefics2PerceiverResampler(nn.Module):
         self.layers = nn.ModuleList([Idefics2PerceiverLayer(config, idx) for idx in range(self.depth)])
         self.norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
 
-        self._use_flash_attention_2 = use_flash_attn
+        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
     def forward(
         self,
@@ -1473,12 +1476,12 @@ class Idefics2Model(Idefics2PreTrainedModel):
 
         self.vision_model = Idefics2VisionTransformer(config.vision_config)
         self.connector = Idefics2Connector(config)
-        self.text_model = AutoModel.from_config(config.text_config, attn_implementation="sdpa")
+        self.text_model = AutoModel.from_config(config.text_config, attn_implementation=config._attn_implementation)
 
         self.image_seq_len = config.perceiver_config.resampler_n_latents
         self.image_token_id = self.config.image_token_id
 
-        self._use_flash_attention_2 = use_flash_attn
+        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
         self.post_init()
 
