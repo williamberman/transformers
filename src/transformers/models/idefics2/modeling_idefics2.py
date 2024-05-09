@@ -1643,10 +1643,11 @@ class Idefics2Model(Idefics2PreTrainedModel):
                     patch_attention_mask=patch_attention_mask,
                 ).last_hidden_state
 
-            # Modality projection & resampling
-            image_hidden_states = self.connector(
-                image_hidden_states, attention_mask=patch_attention_mask.view(pixel_values.size(0), -1)
-            )
+            with contextlib.nullcontext() if self.connector.training else torch.no_grad():
+                # Modality projection & resampling
+                image_hidden_states = self.connector(
+                    image_hidden_states, attention_mask=patch_attention_mask.view(pixel_values.size(0), -1)
+                )
 
         elif image_hidden_states is not None:
             image_hidden_states = image_hidden_states.to(dtype=self.dtype, device=input_ids.device)
