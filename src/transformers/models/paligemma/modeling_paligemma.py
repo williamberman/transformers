@@ -282,8 +282,8 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel):
         self.vocab_size = model_embeds.num_embeddings
         return model_embeds
 
-    def _merge_input_ids_with_image_features(self, image_features, inputs_embeds, input_ids, attention_mask, labels):
-        _, _, embed_dim = image_features.shape
+    def _merge_input_ids_with_image_features(self, image_features, inputs_embeds, input_ids, attention_mask, labels, pixel_mask):
+        _, _, _, embed_dim = image_features.shape
         batch_size, sequence_length = input_ids.shape
         scaled_image_features = image_features / (self.config.hidden_size**0.5)
         final_embedding = torch.zeros(
@@ -300,10 +300,20 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel):
         # insert padding and text token embeddings
         final_embedding = torch.where(text_mask_expanded, inputs_embeds, final_embedding)
         final_embedding = torch.where(pad_mask_expanded, torch.zeros_like(final_embedding), final_embedding)
-        # insert image embeddings - the image mask is always less or equal to the sentence in length
-        final_embedding = final_embedding.masked_scatter(
-            image_mask.unsqueeze(-1).expand_as(final_embedding), scaled_image_features
-        )
+
+        final_embedding_with_image_tokens_replaced = []
+
+        # this has to be done in a loop for the image tokens being truncated check,
+        # i.e. the `[:image_mask_.sum()]` must be per item in batch
+        for final_embedding_, image_mask_, scaled_image_features_, pixel_mask_ in zip(
+            final_embedding, image_mask, scaled_image_features, pixel_mask
+        ):
+            # reshape(-1, 2048) to match the shape of the left hand side.
+            # [:image_mask.sum(), :] in case any of the image tokens in the prompt were removed via truncation
+            final_embedding_[image_mask_] = scaled_image_features_[pixel_mask_].reshape(-1, 2048)[:image_mask_.sum(), :]
+            final_embedding_with_image_tokens_replaced.append(final_embedding_)
+
+        final_embedding = torch.stack(final_embedding_with_image_tokens_replaced)
         final_embedding = torch.where(pad_mask_expanded, torch.zeros_like(final_embedding), final_embedding)
 
         final_attention_mask_4d = attention_mask.unsqueeze(1).unsqueeze(2) * attention_mask.unsqueeze(1).unsqueeze(-1)
@@ -330,6 +340,7 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel):
         self,
         input_ids: torch.LongTensor = None,
         pixel_values: torch.FloatTensor = None,
+        pixel_mask: torch.BoolTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Union[List[torch.FloatTensor], Cache]] = None,
@@ -392,12 +403,17 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel):
 
             # 2. Merge text and images
             if pixel_values is not None and input_ids.shape[1] != 1:
+                # flatten the batch and ims per prompt dims
+                batch_size, ims_per_prompt, channels, height, width = pixel_values.shape
+                pixel_values = pixel_values.reshape(batch_size * ims_per_prompt, channels, height, width)
                 image_outputs = self.vision_tower(pixel_values.to(inputs_embeds.dtype))
                 selected_image_feature = image_outputs.last_hidden_state
                 image_features = self.multi_modal_projector(selected_image_feature)
+                _, seq, dim = image_features.shape
+                image_features = image_features.reshape(batch_size, ims_per_prompt, seq, dim)
 
                 inputs_embeds, attention_mask, labels, position_ids = self._merge_input_ids_with_image_features(
-                    image_features, inputs_embeds, input_ids, attention_mask, labels
+                    image_features, inputs_embeds, input_ids, attention_mask, labels, pixel_mask
                 )
 
             else:

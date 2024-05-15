@@ -25,6 +25,7 @@ from ...image_utils import ImageInput, is_valid_image
 from ...processing_utils import ProcessorMixin
 from ...tokenization_utils_base import AddedToken, PaddingStrategy, PreTokenizedInput, TextInput, TruncationStrategy
 from ...utils import TensorType
+import torch
 
 
 logger = logging.getLogger(__name__)
@@ -64,8 +65,7 @@ def build_string_from_input(prompt, bos_token, image_seq_len, image_token):
         image_seq_len (`int`): The length of the image sequence.
         image_token (`str`): The image token.
     """
-    return f"{image_token * image_seq_len}{bos_token}{prompt}"
-
+    return f"{bos_token}{prompt.replace(image_token, image_token*image_seq_len)}"
 
 class PaliGemmaProcessor(ProcessorMixin):
     r"""
@@ -178,15 +178,11 @@ class PaliGemmaProcessor(ProcessorMixin):
                 "You are using PaliGemma without a text prefix. It will perform as a picture-captioning model."
             )
 
-        if isinstance(text, List) and isinstance(images, List):
-            if len(images) < len(text):
-                raise ValueError(
-                    f"Received {len(images)} images for {len(text)} prompts. Each prompt should be associated with an image."
-                )
         if _is_str_or_image(text):
             text = [text]
         elif isinstance(text, list) and _is_str_or_image(text[0]):
             pass
+
         input_strings = [
             build_string_from_input(
                 prompt=prompt,
@@ -197,21 +193,44 @@ class PaliGemmaProcessor(ProcessorMixin):
             for prompt in text
         ]
 
-        pixel_values = self.image_processor(
-            images,
-            do_resize=do_resize,
-            do_normalize=do_normalize,
-            return_tensors=return_tensors,
-            image_mean=image_mean,
-            image_std=image_std,
-            input_data_format=input_data_format,
-            data_format=data_format,
-            resample=resample,
-            do_convert_rgb=do_convert_rgb,
-        )["pixel_values"]
+        # temp flatten images
+        max_images = 5
+        image_counts = [len(x) for x in images]
+        assert all(x <= max_images for x in image_counts), f"Too many images, max is {max_images}"
+        flattened_images = [x for sublist in images for x in sublist]
 
-        if max_length is not None:
-            max_length += self.image_seq_length  # max_length has to account for the image tokens
+        if len(flattened_images) > 0:
+            pixel_values = self.image_processor(
+                flattened_images,
+                do_resize=do_resize,
+                do_normalize=do_normalize,
+                return_tensors=return_tensors,
+                image_mean=image_mean,
+                image_std=image_std,
+                input_data_format=input_data_format,
+                data_format=data_format,
+                resample=resample,
+                do_convert_rgb=do_convert_rgb,
+            )["pixel_values"]
+
+            pixel_values_ = []
+            pixel_mask = []
+
+            for image_count in image_counts:
+                pixel_values_.append(
+                    torch.concat([
+                        pixel_values[:image_count], 
+                        torch.zeros(max_images - image_count, *pixel_values.shape[1:])
+                    ])
+                )
+                pixel_values = pixel_values[image_count:]
+                pixel_mask.append([True] * image_count + [False] * (max_images - image_count))
+
+            pixel_values = torch.stack(pixel_values_)
+            pixel_mask = torch.tensor(pixel_mask)
+        else:
+            pixel_values = torch.zeros(len(images), max_images, 3, self.image_processor.size['height'], self.image_processor.size['width'])
+            pixel_mask = torch.zeros((len(images), max_images), dtype=torch.bool)
 
         if tokenize_newline_separately:
             inputs = self.tokenizer(
@@ -242,7 +261,7 @@ class PaliGemmaProcessor(ProcessorMixin):
                 truncation=truncation,
             )
 
-        return BatchFeature(data={**text_inputs, "pixel_values": pixel_values})
+        return BatchFeature(data={**text_inputs, "pixel_values": pixel_values, "pixel_mask": pixel_mask})
 
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.batch_decode with CLIP->Gemma
     def batch_decode(self, *args, **kwargs):
