@@ -194,7 +194,7 @@ class PaliGemmaProcessor(ProcessorMixin):
         ]
 
         # temp flatten images
-        max_images = 5
+        max_images = 4
         image_counts = [len(x) for x in images]
         assert all(x <= max_images for x in image_counts), f"Too many images, max is {max_images}"
         flattened_images = [x for sublist in images for x in sublist]

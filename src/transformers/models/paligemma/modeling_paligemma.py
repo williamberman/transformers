@@ -351,6 +351,7 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        output_only_last_hidden_state: Optional[bool] = False,
     ) -> Union[Tuple, PaliGemmaCausalLMOutputWithPast]:
         r"""
         Args:
@@ -382,73 +383,73 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel):
         >>> processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "answer en Where is the cow standing?\nbeach"
         ```"""
-
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError(
-                "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
-            )
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        # the attention mask is turned 4d after, we keep track of the original one
-        input_attention_mask = attention_mask
-
-        if inputs_embeds is None:
-            # 1. Extra the input embeddings
-            inputs_embeds = self.get_input_embeddings()(input_ids)
-
-            # 2. Merge text and images
-            if pixel_values is not None and input_ids.shape[1] != 1:
-                # flatten the batch and ims per prompt dims
-                batch_size, ims_per_prompt, channels, height, width = pixel_values.shape
-                pixel_values = pixel_values.reshape(batch_size * ims_per_prompt, channels, height, width)
-                image_outputs = self.vision_tower(pixel_values.to(inputs_embeds.dtype))
-                selected_image_feature = image_outputs.last_hidden_state
-                image_features = self.multi_modal_projector(selected_image_feature)
-                _, seq, dim = image_features.shape
-                image_features = image_features.reshape(batch_size, ims_per_prompt, seq, dim)
-
-                inputs_embeds, attention_mask, labels, position_ids = self._merge_input_ids_with_image_features(
-                    image_features, inputs_embeds, input_ids, attention_mask, labels, pixel_mask
+        with torch.no_grad():
+            if (input_ids is None) ^ (inputs_embeds is not None):
+                raise ValueError(
+                    "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
                 )
 
-            else:
-                # In case input_ids.shape[1] == 1 & pixel_values==None & past_key_values != None, we are in the case of
-                # generation with cache
-                if past_key_values is not None and pixel_values is not None and input_ids.shape[1] == 1:
-                    # Retrieve the first layer to inspect the logits and mask out the hidden states
-                    # that are set to 0
-                    # TODO @molbap this will only work for dynamic cache.
-                    first_layer_past_key_value = past_key_values[0][0][:, :, :, 0]
+            output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+            output_hidden_states = (
+                output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            )
+            return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-                    # Sum all dimensions of head_dim (-2) to avoid random errors such as: https://github.com/huggingface/transformers/pull/28032#issuecomment-1863691941
-                    batch_index, non_attended_tokens = torch.where(first_layer_past_key_value.float().sum(-2) == 0)
+            # the attention mask is turned 4d after, we keep track of the original one
+            input_attention_mask = attention_mask
 
-                    # Get the target length
-                    target_seqlen = cache_position[-1] + 1
+            if inputs_embeds is None:
+                # 1. Extra the input embeddings
+                inputs_embeds = self.get_input_embeddings()(input_ids)
 
-                    extended_attention_mask = torch.ones(
-                        (attention_mask.shape[0], target_seqlen - attention_mask.shape[1]),
-                        dtype=attention_mask.dtype,
-                        device=attention_mask.device,
+                # 2. Merge text and images
+                if pixel_values is not None and input_ids.shape[1] != 1:
+                    # flatten the batch and ims per prompt dims
+                    batch_size, ims_per_prompt, channels, height, width = pixel_values.shape
+                    pixel_values = pixel_values.reshape(batch_size * ims_per_prompt, channels, height, width)
+                    image_outputs = self.vision_tower(pixel_values.to(inputs_embeds.dtype))
+                    selected_image_feature = image_outputs.last_hidden_state
+                    image_features = self.multi_modal_projector(selected_image_feature)
+                    _, seq, dim = image_features.shape
+                    image_features = image_features.reshape(batch_size, ims_per_prompt, seq, dim)
+
+                    inputs_embeds, attention_mask, labels, position_ids = self._merge_input_ids_with_image_features(
+                        image_features, inputs_embeds, input_ids, attention_mask, labels, pixel_mask
                     )
 
-                    # Filter out only the tokens that can be un-attended, this can happen
-                    # if one uses PaliGemma+ Fused modules where the cache on the
-                    # first iteration is already big enough, or if one passes custom cache
-                    valid_indices = non_attended_tokens < extended_attention_mask.size(-1)
-                    new_batch_index = batch_index[valid_indices]
-                    new_non_attended_tokens = non_attended_tokens[valid_indices]
+                else:
+                    # In case input_ids.shape[1] == 1 & pixel_values==None & past_key_values != None, we are in the case of
+                    # generation with cache
+                    if past_key_values is not None and pixel_values is not None and input_ids.shape[1] == 1:
+                        # Retrieve the first layer to inspect the logits and mask out the hidden states
+                        # that are set to 0
+                        # TODO @molbap this will only work for dynamic cache.
+                        first_layer_past_key_value = past_key_values[0][0][:, :, :, 0]
 
-                    # Zero-out the places where we don't need to attend
-                    extended_attention_mask[new_batch_index, new_non_attended_tokens] = 0
+                        # Sum all dimensions of head_dim (-2) to avoid random errors such as: https://github.com/huggingface/transformers/pull/28032#issuecomment-1863691941
+                        batch_index, non_attended_tokens = torch.where(first_layer_past_key_value.float().sum(-2) == 0)
 
-                    attention_mask = torch.cat((attention_mask, extended_attention_mask), dim=1)
-                    position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
+                        # Get the target length
+                        target_seqlen = cache_position[-1] + 1
+
+                        extended_attention_mask = torch.ones(
+                            (attention_mask.shape[0], target_seqlen - attention_mask.shape[1]),
+                            dtype=attention_mask.dtype,
+                            device=attention_mask.device,
+                        )
+
+                        # Filter out only the tokens that can be un-attended, this can happen
+                        # if one uses PaliGemma+ Fused modules where the cache on the
+                        # first iteration is already big enough, or if one passes custom cache
+                        valid_indices = non_attended_tokens < extended_attention_mask.size(-1)
+                        new_batch_index = batch_index[valid_indices]
+                        new_non_attended_tokens = non_attended_tokens[valid_indices]
+
+                        # Zero-out the places where we don't need to attend
+                        extended_attention_mask[new_batch_index, new_non_attended_tokens] = 0
+
+                        attention_mask = torch.cat((attention_mask, extended_attention_mask), dim=1)
+                        position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
         attention_mask = attention_mask.to(inputs_embeds.dtype)
         outputs = self.language_model(
             attention_mask=attention_mask,
@@ -460,7 +461,16 @@ class PaliGemmaForConditionalGeneration(PaliGemmaPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            output_only_last_hidden_state=output_only_last_hidden_state,
         )
+        if output_only_last_hidden_state:
+            return PaliGemmaCausalLMOutputWithPast(
+                loss=None,
+                logits=None,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
 
         logits = outputs.logits
         logits = logits.float()

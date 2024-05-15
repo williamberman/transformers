@@ -1063,6 +1063,7 @@ class GemmaForCausalLM(GemmaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        output_only_last_hidden_state=False
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1110,6 +1111,16 @@ class GemmaForCausalLM(GemmaPreTrainedModel):
         )
 
         hidden_states = outputs[0]
+
+        if output_only_last_hidden_state:
+            return CausalLMOutputWithPast(
+                loss=None,
+                logits=None,
+                past_key_values=outputs.past_key_values,
+                hidden_states=[hidden_states],
+                attentions=outputs.attentions,
+            )
+
         logits = self.lm_head(hidden_states)
         logits = logits.float()
         loss = None
