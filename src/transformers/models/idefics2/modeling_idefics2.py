@@ -1636,14 +1636,14 @@ class Idefics2Model(Idefics2PreTrainedModel):
             patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
             patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
-            with contextlib.nullcontext() if self.vision_model.training else torch.no_grad():
+            with contextlib.nullcontext() if any(x.training for x in self.vision_model.modules()) else torch.no_grad():
                 # Get sequence from the vision encoder
                 image_hidden_states = self.vision_model(
                     pixel_values=pixel_values,
                     patch_attention_mask=patch_attention_mask,
                 ).last_hidden_state
 
-            with contextlib.nullcontext() if self.connector.training else torch.no_grad():
+            with contextlib.nullcontext() if any(x.training for x in self.connector.modules()) else torch.no_grad():
                 # Modality projection & resampling
                 image_hidden_states = self.connector(
                     image_hidden_states, attention_mask=patch_attention_mask.view(pixel_values.size(0), -1)
@@ -1662,16 +1662,17 @@ class Idefics2Model(Idefics2PreTrainedModel):
                 inputs_embeds=inputs_embeds,
                 image_hidden_states=image_hidden_states,
             )
-
-        outputs = self.text_model(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+            
+        with contextlib.nullcontext() if any(x.training for x in self.text_model.modules()) else torch.no_grad():
+            outputs = self.text_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
 
         if return_legacy_cache:
             outputs.past_key_values = outputs.past_key_values.to_legacy_cache()

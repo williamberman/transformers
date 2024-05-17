@@ -356,7 +356,7 @@ class Idefics2ImageProcessor(BaseImageProcessor):
 
         # XXX
         # max_num_images = max(len(images_) for images_ in images)
-        max_num_images = 5
+        max_num_images = 4
         for images_ in images:
             assert len(images_) <= max_num_images
 
