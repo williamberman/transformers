@@ -597,8 +597,8 @@ def multi_scale_deformable_attention(
         sampling_grid_l_ = sampling_grids[:, :, :, level_id].transpose(1, 2).flatten(0, 1)
         # batch_size*num_heads, hidden_dim, num_queries, num_points
         sampling_value_l_ = nn.functional.grid_sample(
-            value_l_, sampling_grid_l_, mode="bilinear", padding_mode="zeros", align_corners=False
-        )
+            value_l_.float(), sampling_grid_l_.float(), mode="bilinear", padding_mode="zeros", align_corners=False
+        ).to(torch.bfloat16)
         sampling_value_list.append(sampling_value_l_)
     # (batch_size, num_queries, num_heads, num_levels, num_points)
     # -> (batch_size, num_heads, num_queries, num_levels, num_points)
@@ -817,7 +817,7 @@ class GroundingDinoTextEnhancerLayer(nn.Module):
             attention_masks = attention_masks.to(dtype=dtype)  # fp16 compatibility
             attention_masks = (1.0 - attention_masks) * torch.finfo(dtype).min
 
-        queries = keys = self.with_pos_embed(hidden_states, position_embeddings)
+        queries = keys = self.with_pos_embed(hidden_states, position_embeddings).to(hidden_states.dtype)
         attention_output, attention_weights = self.self_attn(
             queries=queries,
             keys=keys,
@@ -2474,6 +2474,7 @@ class GroundingDinoMLPPredictionHead(nn.Module):
         self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
     def forward(self, x):
+        x = x.to(next(self.layers.parameters()).dtype)
         for i, layer in enumerate(self.layers):
             x = nn.functional.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
