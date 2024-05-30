@@ -107,6 +107,7 @@ class Idefics2Processor(ProcessorMixin):
         is_split_into_words: bool = False,
         add_special_tokens: bool = True,
         return_tensors: Optional[Union[str, TensorType]] = None,
+        image_size = None,
     ) -> BatchEncoding:
         """
         Processes the input prompts and returns a BatchEncoding.
@@ -167,6 +168,8 @@ class Idefics2Processor(ProcessorMixin):
                 If set, will return tensors of a particular framework. See [`PreTrainedTokenizerFast.__call__`] for more
                 information.
         """
+        assert image_size is not None
+
         image_seq_len = image_seq_len if image_seq_len is not None else self.image_seq_len
 
         n_images_in_text = []
@@ -228,7 +231,7 @@ class Idefics2Processor(ProcessorMixin):
 
             # Load images if they are URLs
             images = [[load_image(im) for im in sample] for sample in images]
-            image_inputs = self.image_processor(images, return_tensors=return_tensors)
+            image_inputs = self.image_processor(images, return_tensors=return_tensors, size=image_size)
             inputs.update(image_inputs)
 
         return inputs

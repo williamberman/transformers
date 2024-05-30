@@ -572,10 +572,10 @@ class Idefics2ImageProcessor(BaseImageProcessor):
         if do_resize:
             images_list = [
                 [
-                    self.resize(image=image, size=size, resample=resample, input_data_format=input_data_format)
+                    self.resize(image=image, size=size_, resample=resample, input_data_format=input_data_format)
                     for image in images
                 ]
-                for images in images_list
+                for images, size_ in zip(images_list, size)
             ]
 
         if do_rescale:
