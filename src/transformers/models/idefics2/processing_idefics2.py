@@ -181,17 +181,18 @@ class Idefics2Processor(ProcessorMixin):
             elif not isinstance(text, list) and not isinstance(text[0], str):
                 raise ValueError("Invalid input text. Please provide a string, or a list of strings")
 
-            # Replace the image token with fake tokens around the expanded image token sequence of length `image_seq_len`
-            fake_image_token = self.fake_image_token.content
-            image_token = self.image_token.content
-            image_str = f"{fake_image_token}{image_token * image_seq_len}{fake_image_token}"
-
-            if self.image_processor.do_image_splitting:
-                # A single image token is split into 4 patches + 1 original image
-                image_str = image_str * 5
-
             prompt_strings = []
-            for sample in text:
+            for sample, image_seq_len_ in zip(text, image_seq_len):
+
+                # Replace the image token with fake tokens around the expanded image token sequence of length `image_seq_len`
+                fake_image_token = self.fake_image_token.content
+                image_token = self.image_token.content
+                image_str = f"{fake_image_token}{image_token * image_seq_len_}{fake_image_token}"
+
+                if self.image_processor.do_image_splitting:
+                    # A single image token is split into 4 patches + 1 original image
+                    image_str = image_str * 5
+
                 n_images_in_text.append(sample.count(image_token))
                 sample = sample.replace(image_token, image_str)
                 # Remove any double fake tokens if images are adjacent
